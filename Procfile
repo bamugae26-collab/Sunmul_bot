@@ -1,1 +1,1 @@
-worker: python mk2.py
+worker: python chatbot.py
