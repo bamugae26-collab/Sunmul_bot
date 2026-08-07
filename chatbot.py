@@ -35,4 +35,4 @@ async def on_message(message):
     await message.channel.send(reply)
 
 
-bot.run(DISCORD_ToKEN)
+bot.run(DISCORD_TOKEN)
