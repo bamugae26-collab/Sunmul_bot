@@ -2,50 +2,51 @@ import discord
 from discord.ext import tasks
 from google import genai
 import asyncio
+import os
 from datetime import datetime, timedelta
 
-# ================= 설정 구간 =================
-DISCORD_TOKEN = "여기에_디스코드_봇_토큰_입력"
-GEMINI_API_KEY = "여기에_구글_제미나이_API_키_입력"
+# ================= Railway 환경 변수 자동 연동 =================
+# .strip()을 붙여 환경변수 앞뒤에 혹시 모를 공백이나 줄바꿈을 제거합니다.
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# 대화가 없을 때 선톡을 보낼 디스코드 채널 ID (숫자 18~19자리)
-TARGET_CHANNEL_ID = None  # 예: 123456789012345678 (따옴표 없이 숫자만)
+TARGET_CHANNEL_ID = None  
+SILENCE_TIMEOUT = 1800 
+# ============================================================
 
-# 몇 초 동안 말이 없으면 선톡을 보낼지 설정 (예: 1800초 = 30분)
-# 테스트할 때는 20~30초로 낮춰서 확인해 보세요!
-SILENCE_TIMEOUT = 30 
-# ============================================
-
+# 기본 인텐트 설정 및 가동
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 봇 상태 기억용 변수
+# API 키가 정상적으로 로드되었을 때만 클라이언트 초기화
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    ai_client = None
+    print("경고: GEMINI_API_KEY 환경 변수를 찾을 수 없습니다.")
+
 last_message_time = datetime.now()
 last_channel = None
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇이 로그인했습니다. 반말 컨셉 선톡 루프를 시작합니다.')
+    print(f'{bot.user} 봇이 성공적으로 로그인했습니다!')
     global last_message_time
     last_message_time = datetime.now()
-    check_silence.start() # 말이 없는지 감시하는 타이머 시작
+    if not check_silence.is_running():
+        check_silence.start()
 
 @bot.event
 async def on_message(message):
     global last_message_time, last_channel
     
-    # 봇이 쓴 메시지는 무시
-    if message.author == bot.user:
+    if message.author == bot.user or not ai_client:
         return
 
-    # 사람이 말을 했으므로 '마지막 대화 시간'과 '채널'을 업데이트
     last_message_time = datetime.now()
     last_channel = message.channel
 
-    # [기능 1: 상대 대화에 자연스럽게 반말로 끼어들기]
-    # 언급(@봇), 이름 포함, 혹은 20%의 확률로 대화 흐름에 끼어들기
     should_reply = (
         bot.user.mentioned_in(message) or 
         bot.user.name in message.content or 
@@ -53,9 +54,8 @@ async def on_message(message):
     )
 
     if should_reply:
-        async with message.channel.typing(): # 봇이 타이핑 중인 것처럼 표시
+        async with message.channel.typing():
             try:
-                # 반말 컨셉을 위한 프롬프트 수정
                 prompt = (
                     f"너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야. "
                     f"절대 존댓말(~해요, ~입니다, ~습니다)을 쓰지 말고 100% 편한 반말만 사용해줘. "
@@ -70,22 +70,17 @@ async def on_message(message):
             except Exception as e:
                 print(f"끼어들기 에러: {e}")
 
-# [기능 2: 서버에 말이 없으면 먼저 반말로 대화 시작하기 (선톡)]
-@tasks.loop(seconds=5) # 5초마다 서버가 조용한지 체크
+@tasks.loop(seconds=5)
 async def check_silence():
     global last_message_time, last_channel
     
-    # 마지막 대화로부터 지정된 시간(SILENCE_TIMEOUT)이 지났는지 확인
     if datetime.now() - last_message_time > timedelta(seconds=SILENCE_TIMEOUT):
-        # 대화를 보낼 채널 결정 (설정된 ID가 없으면 가장 최근에 대화가 있던 채널)
         target = bot.get_channel(TARGET_CHANNEL_ID) if TARGET_CHANNEL_ID else last_channel
         
-        if target:
+        if target and ai_client:
             try:
-                # 대화를 초기화하기 위해 시간 업데이트 (연속 도배 방지)
                 last_message_time = datetime.now()
                 
-                # 반말 선톡을 위한 프롬프트 수정
                 prompt = (
                     "너는 심심해진 디스코드 대화방에 먼저 말을 거는 친근하고 쾌활한 친구야. "
                     "절대 존댓말을 쓰지 말고 무조건 편한 반말로 작성해줘. "
@@ -100,5 +95,7 @@ async def check_silence():
             except Exception as e:
                 print(f"선톡 에러: {e}")
 
-# 봇 구동
-bot.run(DISCORD_TOKEN)
+if not DISCORD_TOKEN:
+    print("에러: DISCORD_TOKEN 환경 변수가 비어 있습니다. Railway 설정을 확인하세요.")
+else:
+    bot.run(DISCORD_TOKEN)
