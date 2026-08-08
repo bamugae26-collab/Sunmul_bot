@@ -1,8 +1,9 @@
 import discord
 from discord.ext import tasks
 from google import genai
-from groq import AsyncGroq  # 공식 Groq 비동기 라이브러리
 import asyncio
+import aiohttp  # 라이브러리 에러 꼬임을 막기 위한 비동기 다이렉트 통신 라이브러리
+import json
 import os
 from datetime import datetime, timedelta
 
@@ -23,63 +24,67 @@ if GEMINI_API_KEY:
 else:
     ai_client = None
 
-# 백업 Groq 클라이언트 
-if GROQ_API_KEY:
-    groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-else:
-    groq_client = None
-
 last_message_time = datetime.now()
 last_channel = None
 
-# 에러 터짐을 완벽 방어하는 Groq 연동 함수
+# 라이브러리 의존성을 완전히 제거하고 주소로 직접 찌르는 Groq 비동기 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 실패 시 구동이 확실한 Groq 기본 탑재 모델로 호출합니다."""
-    if not groq_client:
+    """라이브러리 충돌 및 400 에러를 우회하여 Groq API에 다이렉트 POST 요청을 전송합니다."""
+    if not GROQ_API_KEY:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
+    # Groq 표준 REST API 엔드포인트와 헤더 직접 구성
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "llama-3.3-70b-versatile",  # 현재 Groq 플랫폼 메인 활성화 프로덕션 모델
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
+                    "무조건 100% 편한 한국어 반말만 사용해라. 의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
+                    "친근하게 대하되 욕설, 비속어, 모욕적인 표현은 절대 쓰지 마. 선은 지키면서 장난쳐줘."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
+            }
+        ],
+        "temperature": 0.6,
+        "max_tokens": 150
+    }
+    
     try:
-        chat_completion = await groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
-                        "무조건 100% 편한 한국어 반말만 사용해라. 의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
-                        "친근하게 대하되 욕설, 비속어, 모욕적인 표현은 절대 쓰지 마. 선은 지키면서 장난쳐줘."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
-                }
-            ],
-            # 70B 계열의 일시적 할당 문제를 피하기 위한 고속 지원 모델로 전격 타협
-            model="gemma2-9b-it",  
-            temperature=0.6,                
-            max_tokens=150                  
-        )
-        return chat_completion.choices.message.content.strip()
+        # 안전장치 타임아웃 10초 부여
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result["choices"][0]["message"]["content"].strip()
+                else:
+                    # 실패 시 Groq 서버가 반환한 원본 에러 코드 확인용 메시지
+                    res_body = await response.text()
+                    print(f"[Groq Direct API Debug Log] Status: {response.status}, Body: {res_body}")
+                    
+                    if response.status == 401:
+                        return "❌ [Groq 오류] API 키 인증 실패(401). Railway Variables 대시보드에 키가 똑바로 입력됐는지 확인해줘!"
+                    if response.status == 429:
+                        return "😭 백업 엔진인 Groq 마저도 일시적인 분당 트래픽 제한(429) 상태야. 잠시만 기다려줘!"
+                    return f"❌ 백업 서버 응답 신호 거절 (HTTP 에러 코드: {response.status})"
+                    
     except Exception as e:
-        # 그 어떤 객체 형태의 에러가 들어와도 문법 충돌(list attribute)이 안 나도록 형변환 캡슐화
-        raw_error_text = ""
-        try:
-            raw_error_text = str(e)
-        except:
-            raw_error_text = repr(e)
-            
-        print(f"[Groq System Error Log] {raw_error_text}")  # Railway 내부에 남는 에러 로그
-        
-        if "429" in raw_error_text:
-            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        if "400" in raw_error_text:
-            return "❌ 백업 엔진(Groq)의 요청 형식이나 인증에 문제가 있어. 레일웨이의 GROQ_API_KEY를 다시 확인해줘."
-            
-        return "❌ 백업 서버 신호 일시적 응답 지연! 잠시 후 다시 시도해줘."
+        print(f"[Groq Network Exception] {str(e)}")
+        return "❌ 백업 서버와 연결에 실패했습니다. (네트워크 지연)"
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (에러 무한 루프 긴급 탈출 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (다이렉트 우회 웹패치 적용 완료)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -117,7 +122,7 @@ async def on_message(message):
                 except Exception as gemini_error:
                     print(f"[Gemini Error] {gemini_error} -> Groq 엔진으로 전환합니다.")
             
-            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 실행
+            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 다이렉트 실행
             groq_response = await generate_with_groq(message.content)
             await message.channel.send(groq_response)
 
