@@ -3,10 +3,11 @@ from discord.ext import tasks
 from google import genai
 import asyncio
 import os
+import random
+import re  # 텍스트 정제를 위한 정규식 라이브러리
 from datetime import datetime, timedelta
 
 # ================= Railway 환경 변수 자동 연동 =================
-# .strip()을 붙여 환경변수 앞뒤에 혹시 모를 공백이나 줄바꿈을 제거합니다.
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
@@ -14,12 +15,10 @@ TARGET_CHANNEL_ID = None
 SILENCE_TIMEOUT = 1800 
 # ============================================================
 
-# 기본 인텐트 설정 및 가동
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
 
-# API 키가 정상적으로 로드되었을 때만 클라이언트 초기화
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
@@ -47,13 +46,11 @@ async def on_message(message):
     last_message_time = datetime.now()
     last_channel = message.channel
 
-    should_reply = (
-        bot.user.mentioned_in(message) or 
-        bot.user.name in message.content or 
-        (asyncio.get_event_loop().time() % 5 == 0)
-    )
+    is_called = bot.user.mentioned_in(message) or (bot.user.name in message.content)
+    is_random_interrup = random.random() < 0.3
 
-    if should_reply:
+    if is_called or is_random_interrup:
+        # 봇이 입력 중인 표시 켜기
         async with message.channel.typing():
             try:
                 prompt = (
@@ -66,9 +63,30 @@ async def on_message(message):
                     model='gemini-2.5-flash',
                     contents=prompt
                 )
-                await message.channel.send(response.text)
+                
+                # 가공되지 않은 텍스트 추출
+                reply_text = str(response.text).strip()
+                
+                # [안전장치] 만약 제미나이가 빈 대답을 보냈거나 오류 문자가 섞였다면 기본 멘트 출력
+                if not reply_text:
+                    reply_text = "어.. 뭐라고? 잘 못 들었어 ㅋㅋ"
+                
+                # 디스코드 전송 제한을 위해 글자수 컷
+                if len(reply_text) > 1900:
+                    reply_text = reply_text[:1900] + "..."
+                
+                # 최종 디스코드 채널로 답장 전송
+                await message.channel.send(reply_text)
+                
+            except discord.errors.Forbidden:
+                print("권한 에러: 봇이 이 채널에 메시지나 링크를 보낼 권한이 없습니다. 서버 설정을 확인하세요.")
             except Exception as e:
-                print(f"끼어들기 에러: {e}")
+                print(f"시스템 오류 발생: {e}")
+                # 최소한의 대답이라도 강제 전송 시도
+                try:
+                    await message.channel.send("어 왜 불렀어? 무슨 일 있어? ㅋㅋ")
+                except:
+                    pass
 
 @tasks.loop(seconds=5)
 async def check_silence():
@@ -91,11 +109,11 @@ async def check_silence():
                     model='gemini-2.5-flash',
                     contents=prompt
                 )
-                await target.send(response.text)
+                await target.send(str(response.text).strip())
             except Exception as e:
                 print(f"선톡 에러: {e}")
 
 if not DISCORD_TOKEN:
-    print("에러: DISCORD_TOKEN 환경 변수가 비어 있습니다. Railway 설정을 확인하세요.")
+    print("에러: DISCORD_TOKEN 환경 변수가 비어 있습니다.")
 else:
     bot.run(DISCORD_TOKEN)
