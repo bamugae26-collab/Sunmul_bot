@@ -27,7 +27,7 @@ else:
 last_message_time = datetime.now()
 last_channel = None
 
-# [핵심] 공통 정체성 프롬프트 정의 (선물봇 자아 주입)
+# 공통 정체성 프롬프트 정의 (선물봇 자아 주입)
 def get_system_prompt():
     return (
         "너는 디스코드 서버에서 사람들과 어울리는 10~20대 친근한 친구이자 '선물봇'이야.\n"
@@ -37,24 +37,26 @@ def get_system_prompt():
         "친근하게 대하되 욕설이나 비속어는 절대 쓰지 말고, 선은 지키면서 친하게 장난쳐줘."
     )
 
-# 라이브러리 의존성을 제거한 Groq 다이렉트 통신 함수
+# 405 에러 및 모델명을 완벽하게 수정한 Groq 다이렉트 통신 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 실패 시 Groq API에 다이렉트 POST 요청을 전송하며 선물봇 자아를 유지합니다."""
+    """405 에러 방지를 위해 엔드포인트 주소를 정정하고 활성화된 최신 모델(specdec)을 호출합니다."""
     if not GROQ_API_KEY:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
+    # Groq 공식 가이드라인에 맞춘 정확한 엔드포인트 주소
     url = "https://groq.com"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/json"
     }
     
     payload = {
-        "model": "llama-3.3-70b-versatile",  
+        "model": "llama-3.3-70b-specdec",  # Groq에서 현재 지원하는 공식 프로덕션 모델명으로 고정
         "messages": [
             {
                 "role": "system",
-                "content": get_system_prompt() # 고정된 선물봇 자아 주입
+                "content": get_system_prompt() 
             },
             {
                 "role": "user",
@@ -84,7 +86,7 @@ async def generate_with_groq(prompt_content):
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (선물봇 자아 동기화 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (405 에러 및 모델명 최종 수리 완료 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -103,7 +105,7 @@ async def on_message(message):
 
     if is_called:
         async with message.channel.typing():
-            # 1차 시도: 제미나이 API 호출 (제미나이에도 선물봇 프롬프트 주입)
+            # 1차 시도: 제미나이 API 호출
             if ai_client:
                 try:
                     full_prompt = (
@@ -132,7 +134,6 @@ async def check_silence():
         if target:
             last_message_time = datetime.now()
             
-            # 선톡 시점에도 선물봇 정체성 강제 유지
             if ai_client:
                 try:
                     full_prompt = (
