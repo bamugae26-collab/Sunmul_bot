@@ -6,6 +6,40 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
+
+async def generate_with_groq(prompt_content):
+    """제미나이 한도 초과 시 Groq 공식 SDK를 통해 안정적으로 호출합니다."""
+    if not groq_client:
+        return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
+        
+    try:
+        # System 역할을 명확히 분리하여 모델이 인성을 지키고 한글로만 말하도록 강제
+        chat_completion = await groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
+                        "무조건 100% 편한 한국어 반말만 사용해라. 의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
+                        "친근하게 대하되 욕설, 비속어, 모욕적인 표현은 절대 쓰지 마. 선은 지키면서 장난쳐줘."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
+                }
+            ],
+            model="llama-3.3-70b-specdec",  # 더 안정적인 추론 모델로 변경
+            temperature=0.6,                # 창의성을 살짝 낮춰 헛소리 확률 감소
+            max_tokens=150                  # 답변이 너무 길어져 뇌절하는 것 방지
+        )
+        return chat_completion.choices.message.content.strip()
+    except Exception as e:
+        if "429" in str(e):
+            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
+        return f"❌ 백업 엔진 에러 발생: {str(e)[:50]}"
+
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()  
