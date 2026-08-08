@@ -6,6 +6,40 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
+# 수정된 Groq 비동기 함수 (한국어 꼬임 및 비속어 헛소리 방지)
+async def generate_with_groq(prompt_content):
+    """제미나이 한도 초과 시 Groq 공식 SDK를 통해 안정적으로 호출합니다."""
+    if not groq_client:
+        return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
+        
+    try:
+        # System 역할을 명확히 분리하여 모델이 인성을 지키고 한글로만 말하도록 강제
+        chat_completion = await groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
+                        "무조건 100% 편한 한국어 반말만 사용해라. 의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
+                        "친근하게 대하되 욕설, 비속어, 모욕적인 표현은 절대 쓰지 마. 선은 지키면서 장난쳐줘."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
+                }
+            ],
+            model="llama-3.3-70b-specdec",  # 더 안정적인 추론 모델로 변경
+            temperature=0.6,                # 창의성을 살짝 낮춰 헛소리 확률 감소
+            max_tokens=150                  # 답변이 너무 길어져 뇌절하는 것 방지
+        )
+        return chat_completion.choices.message.content.strip()
+    except Exception as e:
+        if "429" in str(e):
+            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
+        return f"❌ 백업 엔진 에러 발생: {str(e)[:50]}"
+
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()  
@@ -32,9 +66,9 @@ else:
 last_message_time = datetime.now()
 last_channel = None
 
-# 에러 파싱 및 모델명이 완벽히 해결된 Groq 비동기 함수
+# Groq 공식 2026 프로덕션 가동 모델 연동 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 한도 초과 시 Groq 공식 최신 가동 모델로 호출합니다."""
+    """제미나이 한도 초과 시 Groq 공식 서비스 모델인 llama-3.3-70b-versatile로 즉시 복구 호출합니다."""
     if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
@@ -54,23 +88,24 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="llama-3.3-70b-specdec",  # Groq 공식 액티브 모델명 적용
+            model="llama-3.3-70b-versatile",  # 현재 Groq 플랫폼에서 공식 지원하는 최종 활성화 모델명
             temperature=0.6,                
             max_tokens=150                  
         )
         return chat_completion.choices.message.content.strip()
     except Exception as e:
-        # 객체나 리스트 에러가 터져도 디스코드를 터트리지 않도록 안전하게 문자열 강제 변환
         error_msg = str(repr(e))
-        print(f"[Groq API Error Log] {error_msg}") # 레일웨이 터미널 로그 확인용
+        print(f"[Groq API Error Log] {error_msg}")  # 레일웨이 실시간 로그 창에서 트래킹 가능하도록 출력
         
         if "429" in error_msg:
             return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
+        if "400" in error_msg:
+            return "❌ 모델 에러가 다시 발생했습니다. Groq 대시보드의 지원 모델을 확인해주세요."
         return "❌ 백업 엔진 일시적 신호 불안정! 잠시 후 다시 시도해줘."
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (최종 모델 교정 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (Groq 실시간 기동 모델 완전 교정 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
