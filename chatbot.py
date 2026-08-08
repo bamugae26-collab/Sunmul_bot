@@ -27,7 +27,7 @@ else:
 if GROQ_API_KEY:
     groq_client = AsyncOpenAI(
         api_key=GROQ_API_KEY,
-        base_url="https://groq.com"  
+        base_url="https://api.groq.com/openai/v1"   # 수정: 정확한 OpenAI 호환 엔드포인트
     )
 else:
     groq_client = None
@@ -63,7 +63,7 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="llama-3.3-70b-specdec",  # 그록 메인 서비스 가동 모델 주소 지정
+            model="openai/gpt-oss-120b",  # 수정: llama-3.3-70b-specdec는 deprecated 계열이라 최신 모델로 교체
             temperature=0.6,
             max_tokens=150
         )
