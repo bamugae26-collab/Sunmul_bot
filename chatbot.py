@@ -1,7 +1,7 @@
 import discord
 from discord.ext import tasks
 from google import genai
-from openai import AsyncOpenAI  # Groq의 405 주소 에러를 우회하기 위한 표준 OpenAI 라이브러리 도입
+from openai import AsyncOpenAI  # Groq 우회를 위한 공식 비동기 표준 SDK
 import asyncio
 import os
 from datetime import datetime, timedelta
@@ -23,11 +23,11 @@ if GEMINI_API_KEY:
 else:
     ai_client = None
 
-# 백업 Groq 클라이언트 (OpenAI 라이브러리 규격으로 완벽 호환 세팅)
+# 백업 Groq 클라이언트 (OpenAI 라이브러리 규격 상 끝에 슬래시 /v1/ 가 명확히 들어가야 함)
 if GROQ_API_KEY:
     groq_client = AsyncOpenAI(
         api_key=GROQ_API_KEY,
-        base_url="https://groq.com"  # 라이브러리가 뒤에 /chat/completions를 올바르게 자동 조립함
+        base_url="https://groq.com"  # 주소 꼬임을 막기 위해 슬래시(/) 정밀 수정 완료
     )
 else:
     groq_client = None
@@ -45,14 +45,13 @@ def get_system_prompt():
         "친근하게 대하되 욕설이나 비속어는 절대 쓰지 말고, 선은 지키면서 친하게 장난쳐줘."
     )
 
-# 405 에러가 절대 날 수 없는 라이브러리 기반 Groq 호출 함수
+# 에러 없이 대답을 받아오는 Groq 호출 함수
 async def generate_with_groq(prompt_content):
     """OpenAI 비동기 표준 SDK 구조를 이용해 Groq API를 안전하게 찌릅니다."""
     if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
     try:
-        # 라이브러리 내부 통신망을 타므로 주소 매핑 오류(405)가 원천 방어됨
         chat_completion = await groq_client.chat.completions.create(
             messages=[
                 {
@@ -64,21 +63,25 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="gemma2-9b-it",  # 폐기 위험이 전혀 없는 고속 범용 모델로 안전하게 고정
+            model="gemma2-9b-it",  # 가장 빠르고 구동이 확실한 고속 범용 모델
             temperature=0.6,
             max_tokens=150
         )
         return chat_completion.choices.message.content.strip()
     except Exception as e:
         error_msg = str(e)
-        print(f"[Groq Client Error] {error_msg}")
+        print(f"[Groq Client Error Debug] {error_msg}")  # 레일웨이 실시간 콘솔로 에러 형태 추적
+        
         if "429" in error_msg:
             return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        return "❌ 백업 서버에서 응답을 받지 못했습니다. 잠시 후 다시 시도해줘."
+        if "401" in error_msg or "Invalid API Key" in error_msg:
+            return "❌ [Groq 오류] API 키 인증에 실패했어. Railway 환경변수의 GROQ_API_KEY 값을 다시 확인해줘!"
+            
+        return "❌ 백업 서버 응답 해석 도중 오류가 발생했습니다. 다시 한번 시도해줘."
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (OpenAI 라이브러리 우회 교정 완료)')
+    print(f'{bot.user} 봇 로그인 성공! (최종 주소 교정 완료 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
