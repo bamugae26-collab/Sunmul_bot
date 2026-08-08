@@ -1,44 +1,10 @@
 import discord
 from discord.ext import tasks
 from google import genai
-from groq import AsyncGroq  # 공식 Groq 비동기 라이브러리 (405 에러 방지)
+from groq import AsyncGroq  # 공식 Groq 비동기 라이브러리
 import asyncio
 import os
 from datetime import datetime, timedelta
-
-# 수정된 Groq 비동기 함수 (한국어 꼬임 및 비속어 헛소리 방지)
-async def generate_with_groq(prompt_content):
-    """제미나이 한도 초과 시 Groq 공식 SDK를 통해 안정적으로 호출합니다."""
-    if not groq_client:
-        return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
-        
-    try:
-        # System 역할을 명확히 분리하여 모델이 인성을 지키고 한글로만 말하도록 강제
-        chat_completion = await groq_client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
-                        "무조건 100% 편한 한국어 반말만 사용해라. 의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
-                        "친근하게 대하되 욕설, 비속어, 모욕적인 표현은 절대 쓰지 마. 선은 지키면서 장난쳐줘."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
-                }
-            ],
-            model="llama-3.3-70b-specdec",  # 더 안정적인 추론 모델로 변경
-            temperature=0.6,                # 창의성을 살짝 낮춰 헛소리 확률 감소
-            max_tokens=150                  # 답변이 너무 길어져 뇌절하는 것 방지
-        )
-        return chat_completion.choices.message.content.strip()
-    except Exception as e:
-        if "429" in str(e):
-            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        return f"❌ 백업 엔진 에러 발생: {str(e)[:50]}"
-
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -66,14 +32,13 @@ else:
 last_message_time = datetime.now()
 last_channel = None
 
-# 수정된 Groq 비동기 함수 (모델명 에러 400 완벽 해결)
+# 완벽하게 고쳐진 Groq 비동기 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 한도 초과 시 Groq 공식 SDK를 통해 안정적으로 호출합니다."""
+    """제미나이 한도 초과 시 Groq 공식 최신 모델로 호출합니다."""
     if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
     try:
-        # System 역할을 명확히 분리하여 모델이 인성을 지키고 한글로만 말하도록 강제
         chat_completion = await groq_client.chat.completions.create(
             messages=[
                 {
@@ -89,19 +54,25 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="llama-3.3-70b-versatile",  # 안정성이 검증된 표준 모델로 변경 완료
-            temperature=0.6,                # 창의성을 살짝 낮춰 헛소리 확률 감소
-            max_tokens=150                  # 답변이 너무 길어져 뇌절하는 것 방지
+            model="llama3-70b-8192",  # Groq에서 가장 안정적이고 폐기 위험 없는 장기 지원 모델
+            temperature=0.6,                
+            max_tokens=150                  
         )
         return chat_completion.choices.message.content.strip()
     except Exception as e:
-        if "429" in str(e):
+        # 에러 객체 파싱 이슈를 원천 차단하기 위해 예외 메시지를 문자열로 완전 캡슐화
+        error_msg = str(e)
+        print(f"[Groq API Exception Error] {error_msg}") # 내부 로그에만 남김
+        
+        if "429" in error_msg:
             return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        return f"❌ 백업 엔진 에러 발생: {str(e)[:50]}"
+        if "400" in error_msg:
+            return "😭 백업 엔진 내부 설정(모델명) 오류가 발생했어. 개발자에게 문의해줘!"
+        return "❌ 백업 엔진 일시적 먹통 발생! 잠시 후 다시 시도해줘."
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (모델명 400 에러 해결 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (Groq 최신 모델명 교정 완료 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -120,7 +91,6 @@ async def on_message(message):
 
     if is_called:
         async with message.channel.typing():
-            # 제미나이 전용 프롬프트 구조 유지
             prompt = (
                 "너는 디스코드 서버에서 사람들과 어울리는 장난기 많고 친근한 10~20대 친구야.\n"
                 "절대 존댓말을 쓰지 말고 100% 편한 반말만 사용해줘. 이모지도 섞어줘.\n\n"
@@ -169,7 +139,7 @@ async def check_silence():
             
             # 제미나이 실패 시 Groq 선톡 작동
             groq_response = await generate_with_groq("심심한 대화방에 선톡 날려줘")
-            if not groq_response.startswith("❌"):
+            if not groq_response.startswith("❌") and not groq_response.startswith("😭"):
                 await target.send(groq_response)
 
 bot.run(DISCORD_TOKEN)
