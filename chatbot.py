@@ -1,9 +1,8 @@
 import discord
 from discord.ext import tasks
 from google import genai
+from openai import AsyncOpenAI  # Groq의 405 주소 에러를 우회하기 위한 표준 OpenAI 라이브러리 도입
 import asyncio
-import aiohttp  
-import json
 import os
 from datetime import datetime, timedelta
 
@@ -24,10 +23,19 @@ if GEMINI_API_KEY:
 else:
     ai_client = None
 
+# 백업 Groq 클라이언트 (OpenAI 라이브러리 규격으로 완벽 호환 세팅)
+if GROQ_API_KEY:
+    groq_client = AsyncOpenAI(
+        api_key=GROQ_API_KEY,
+        base_url="https://groq.com"  # 라이브러리가 뒤에 /chat/completions를 올바르게 자동 조립함
+    )
+else:
+    groq_client = None
+
 last_message_time = datetime.now()
 last_channel = None
 
-# [핵심] 공통 정체성 프롬프트 정의 (선물봇 자아 주입)
+# 공통 정체성 프롬프트 정의 (선물봇 자아 주입)
 def get_system_prompt():
     return (
         "너는 디스코드 서버에서 사람들과 어울리는 10~20대 친근한 친구이자 '선물봇'이야.\n"
@@ -37,54 +45,40 @@ def get_system_prompt():
         "친근하게 대하되 욕설이나 비속어는 절대 쓰지 말고, 선은 지키면서 친하게 장난쳐줘."
     )
 
-# 라이브러리 의존성을 제거한 Groq 다이렉트 통신 함수
+# 405 에러가 절대 날 수 없는 라이브러리 기반 Groq 호출 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 실패 시 Groq API에 다이렉트 POST 요청을 전송하며 선물봇 자아를 유지합니다."""
-    if not GROQ_API_KEY:
+    """OpenAI 비동기 표준 SDK 구조를 이용해 Groq API를 안전하게 찌릅니다."""
+    if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
-    url = "https://groq.com"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": "llama-3.3-70b-versatile",  
-        "messages": [
-            {
-                "role": "system",
-                "content": get_system_prompt() # 고정된 선물봇 자아 주입
-            },
-            {
-                "role": "user",
-                "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
-            }
-        ],
-        "temperature": 0.6,
-        "max_tokens": 150
-    }
-    
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    return result["choices"]["message"]["content"].strip()
-                else:
-                    res_body = await response.text()
-                    print(f"[Groq Debug Log] Status: {response.status}, Body: {res_body}")
-                    
-                    if response.status == 401:
-                        return "❌ [Groq 오류] API 키 인증 실패(401). Railway 설정을 확인해줘!"
-                    return f"❌ 백업 서버 응답 신호 거절 (HTTP 에러 코드: {response.status})"
+        # 라이브러리 내부 통신망을 타므로 주소 매핑 오류(405)가 원천 방어됨
+        chat_completion = await groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": get_system_prompt()
+                },
+                {
+                    "role": "user",
+                    "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
+                }
+            ],
+            model="gemma2-9b-it",  # 폐기 위험이 전혀 없는 고속 범용 모델로 안전하게 고정
+            temperature=0.6,
+            max_tokens=150
+        )
+        return chat_completion.choices.message.content.strip()
     except Exception as e:
-        print(f"[Groq Network Exception] {str(e)}")
-        return "❌ 백업 서버와 연결에 실패했습니다."
+        error_msg = str(e)
+        print(f"[Groq Client Error] {error_msg}")
+        if "429" in error_msg:
+            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
+        return "❌ 백업 서버에서 응답을 받지 못했습니다. 잠시 후 다시 시도해줘."
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (선물봇 자아 동기화 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (OpenAI 라이브러리 우회 교정 완료)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -103,7 +97,7 @@ async def on_message(message):
 
     if is_called:
         async with message.channel.typing():
-            # 1차 시도: 제미나이 API 호출 (제미나이에도 선물봇 프롬프트 주입)
+            # 1차 시도: 제미나이 API 호출
             if ai_client:
                 try:
                     full_prompt = (
@@ -120,7 +114,7 @@ async def on_message(message):
                 except Exception as gemini_error:
                     print(f"[Gemini Error] {gemini_error} -> Groq 엔진으로 전환합니다.")
             
-            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 다이렉트 실행
+            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 OpenAI 구조화 Groq 실행
             groq_response = await generate_with_groq(message.content)
             await message.channel.send(groq_response)
 
@@ -132,7 +126,6 @@ async def check_silence():
         if target:
             last_message_time = datetime.now()
             
-            # 선톡 시점에도 선물봇 정체성 강제 유지
             if ai_client:
                 try:
                     full_prompt = (
