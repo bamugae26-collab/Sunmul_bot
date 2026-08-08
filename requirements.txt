@@ -1,4 +1,4 @@
 discord.py
 google-genai
 pydantic
-aiohttp
+groq
