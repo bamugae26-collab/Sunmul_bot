@@ -66,7 +66,7 @@ else:
 last_message_time = datetime.now()
 last_channel = None
 
-# 수정된 Groq 비동기 함수 (한국어 꼬임 및 비속어 헛소리 방지)
+# 수정된 Groq 비동기 함수 (모델명 에러 400 완벽 해결)
 async def generate_with_groq(prompt_content):
     """제미나이 한도 초과 시 Groq 공식 SDK를 통해 안정적으로 호출합니다."""
     if not groq_client:
@@ -89,7 +89,7 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="llama-3.3-70b-specdec",  # 더 안정적인 추론 모델로 변경
+            model="llama-3.3-70b-versatile",  # 안정성이 검증된 표준 모델로 변경 완료
             temperature=0.6,                # 창의성을 살짝 낮춰 헛소리 확률 감소
             max_tokens=150                  # 답변이 너무 길어져 뇌절하는 것 방지
         )
@@ -101,7 +101,7 @@ async def generate_with_groq(prompt_content):
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (대화 교정 완려 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (모델명 400 에러 해결 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -140,7 +140,7 @@ async def on_message(message):
                 except Exception as gemini_error:
                     print(f"[Gemini Error] {gemini_error} -> Groq 엔진으로 전환합니다.")
             
-            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 실행 (매개변수 수정 완료)
+            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 실행
             groq_response = await generate_with_groq(message.content)
             await message.channel.send(groq_response)
 
