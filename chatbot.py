@@ -5,14 +5,13 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 
-# ================= Railway 환경 변수 자동 연동 =================
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 TARGET_CHANNEL_ID = None  
-# 선톡 기준을 30분(1800초)으로 넉넉하게 설정
 SILENCE_TIMEOUT = 1800 
-# ============================================================
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -43,7 +42,7 @@ async def on_message(message):
     last_message_time = datetime.now()
     last_channel = message.channel
 
-    # [API 절약 변경점] 봇 이름이 불리거나 @태그 당했을 때만 100% 칼답 (무작위 끼어들기 일시 중지)
+
     is_called = bot.user.mentioned_in(message) or (bot.user.name in message.content)
 
     if is_called:
@@ -63,7 +62,7 @@ async def on_message(message):
             except Exception as e:
                 await message.channel.send(f"😭 제미나이 한도 초과 오류 발생: {str(e)[:50]}")
 
-# [API 절약 변경점] 감시 주기를 5초에서 5분(300초)으로 대폭 늘려 구글 차단 방지
+
 @tasks.loop(seconds=300) 
 async def check_silence():
     global last_message_time, last_channel
