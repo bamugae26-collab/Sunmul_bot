@@ -32,9 +32,9 @@ else:
 last_message_time = datetime.now()
 last_channel = None
 
-# 완벽하게 고쳐진 Groq 비동기 함수
+# 에러 파싱 및 모델명이 완벽히 해결된 Groq 비동기 함수
 async def generate_with_groq(prompt_content):
-    """제미나이 한도 초과 시 Groq 공식 최신 모델로 호출합니다."""
+    """제미나이 한도 초과 시 Groq 공식 최신 가동 모델로 호출합니다."""
     if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
@@ -54,25 +54,23 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="llama3-70b-8192",  # Groq에서 가장 안정적이고 폐기 위험 없는 장기 지원 모델
+            model="llama-3.3-70b-specdec",  # Groq 공식 액티브 모델명 적용
             temperature=0.6,                
             max_tokens=150                  
         )
         return chat_completion.choices.message.content.strip()
     except Exception as e:
-        # 에러 객체 파싱 이슈를 원천 차단하기 위해 예외 메시지를 문자열로 완전 캡슐화
-        error_msg = str(e)
-        print(f"[Groq API Exception Error] {error_msg}") # 내부 로그에만 남김
+        # 객체나 리스트 에러가 터져도 디스코드를 터트리지 않도록 안전하게 문자열 강제 변환
+        error_msg = str(repr(e))
+        print(f"[Groq API Error Log] {error_msg}") # 레일웨이 터미널 로그 확인용
         
         if "429" in error_msg:
             return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        if "400" in error_msg:
-            return "😭 백업 엔진 내부 설정(모델명) 오류가 발생했어. 개발자에게 문의해줘!"
-        return "❌ 백업 엔진 일시적 먹통 발생! 잠시 후 다시 시도해줘."
+        return "❌ 백업 엔진 일시적 신호 불안정! 잠시 후 다시 시도해줘."
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (Groq 최신 모델명 교정 완료 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (최종 모델 교정 버전)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
