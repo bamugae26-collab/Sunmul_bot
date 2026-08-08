@@ -1,7 +1,7 @@
 import discord
 from discord.ext import tasks
 from google import genai
-from openai import AsyncOpenAI  # Groq 우회를 위한 공식 비동기 표준 SDK
+from openai import AsyncOpenAI  
 import asyncio
 import os
 from datetime import datetime, timedelta
@@ -23,11 +23,11 @@ if GEMINI_API_KEY:
 else:
     ai_client = None
 
-# 백업 Groq 클라이언트 (OpenAI 라이브러리 규격 상 끝에 슬래시 /v1/ 가 명확히 들어가야 함)
+# 백업 Groq 클라이언트
 if GROQ_API_KEY:
     groq_client = AsyncOpenAI(
         api_key=GROQ_API_KEY,
-        base_url="https://groq.com"  # 주소 꼬임을 막기 위해 슬래시(/) 정밀 수정 완료
+        base_url="https://groq.com"  
     )
 else:
     groq_client = None
@@ -45,9 +45,9 @@ def get_system_prompt():
         "친근하게 대하되 욕설이나 비속어는 절대 쓰지 말고, 선은 지키면서 친하게 장난쳐줘."
     )
 
-# 에러 없이 대답을 받아오는 Groq 호출 함수
+# 라이브러리 파싱 버그를 원천 차단한 Groq 호출 함수
 async def generate_with_groq(prompt_content):
-    """OpenAI 비동기 표준 SDK 구조를 이용해 Groq API를 안전하게 찌릅니다."""
+    """OpenAI 비동기 표준 SDK 구조를 이용하되, 딕셔너리 안전 분해 방식으로 대답을 파싱합니다."""
     if not groq_client:
         return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
         
@@ -63,25 +63,33 @@ async def generate_with_groq(prompt_content):
                     "content": f"상대방 내용: '{prompt_content}'\n이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
                 }
             ],
-            model="gemma2-9b-it",  # 가장 빠르고 구동이 확실한 고속 범용 모델
+            model="llama-3.3-70b-specdec",  # 그록 메인 서비스 가동 모델 주소 지정
             temperature=0.6,
             max_tokens=150
         )
-        return chat_completion.choices.message.content.strip()
+        
+        # [핵심 수리] 객체 접근법과 딕셔너리 접근법을 둘 다 엮어 파싱 버그 원천 차단
+        try:
+            return chat_completion.choices[0].message.content.strip()
+        except:
+            # 만약 객체 접근이 실패하면 딕셔너리 모델로 강제 덤프 후 안전 추출
+            res_dict = chat_completion.model_dump()
+            return res_dict['choices'][0]['message']['content'].strip()
+            
     except Exception as e:
         error_msg = str(e)
-        print(f"[Groq Client Error Debug] {error_msg}")  # 레일웨이 실시간 콘솔로 에러 형태 추적
+        print(f"[Groq Client Fatal Error] {error_msg}")  # 레일웨이 터미널에서 확인 가능한 진짜 에러
         
         if "429" in error_msg:
             return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        if "401" in error_msg or "Invalid API Key" in error_msg:
+        if "401" in error_msg:
             return "❌ [Groq 오류] API 키 인증에 실패했어. Railway 환경변수의 GROQ_API_KEY 값을 다시 확인해줘!"
             
-        return "❌ 백업 서버 응답 해석 도중 오류가 발생했습니다. 다시 한번 시도해줘."
+        return f"❌ 백업 서버 통신 장치 충돌 발생! (원인: {error_msg[:30]})"
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (최종 주소 교정 완료 버전)')
+    print(f'{bot.user} 봇 로그인 성공! (파싱 버그 최종 수리 완려)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
