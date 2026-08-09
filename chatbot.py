@@ -7,6 +7,7 @@ import asyncio
 import os
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -16,6 +17,11 @@ TARGET_CHANNEL_ID = None
 SILENCE_TIMEOUT = 1800
 MAX_HISTORY_TURNS = 12  # 채널별로 기억할 최근 메시지 개수
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024  # 15MB - 너무 큰 파일은 스킵 (요청 용량 제한 대비)
+
+KST = ZoneInfo("Asia/Seoul")
+QUIET_HOUR_START = 0   # 밤 12시
+QUIET_HOUR_END = 6     # 오전 6시
+GOODNIGHT_HOUR = 23    # 이 시간대에 하루 한 번 자기 전 인사
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,6 +44,7 @@ else:
 
 last_message_time = datetime.now()
 last_channel = None
+last_goodnight_date = None  # 오늘 자기 전 인사를 이미 했는지 추적
 
 # 채널별 최근 대화 기록 (맥락 파악용)
 channel_history = defaultdict(lambda: deque(maxlen=MAX_HISTORY_TURNS))
@@ -133,7 +140,7 @@ async def generate_with_groq(channel_id, current_user_name, prompt_content, has_
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (맥락 기억 + 정체성 주입 + 답변 완결성 + 이미지/영상 인식 완료)')
+    print(f'{bot.user} 봇 로그인 성공! (맥락 기억 + 정체성 주입 + 답변 완결성 + 이미지/영상 인식 + 새벽 제한/굿나잇 인사 완료)')
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -190,8 +197,49 @@ async def on_message(message):
 
 @tasks.loop(seconds=300) 
 async def check_silence():
-    global last_message_time, last_channel
+    global last_message_time, last_channel, last_goodnight_date
+
+    now_kst = datetime.now(KST)
+
+    # --- 자기 전 인사: 23시대에 하루 한 번, 대화 활발 여부와 무관하게 ---
+    if now_kst.hour == GOODNIGHT_HOUR and last_goodnight_date != now_kst.date():
+        goodnight_target = bot.get_channel(TARGET_CHANNEL_ID) if TARGET_CHANNEL_ID else last_channel
+        if goodnight_target:
+            goodnight_text = None
+            if ai_client:
+                try:
+                    goodnight_prompt = (
+                        f"{get_system_prompt()}\n\n"
+                        "지금은 밤 11시대야. 너는 곧 새벽 시간이라 잠깐 쉬러 들어갈 예정이야.\n"
+                        "얘들아한테 '나 이제 자러 갈게~' 느낌으로 짧고 귀엽게 인사하고, "
+                        "아침에 다시 올게 같은 뉘앙스로 한 문장만 말해줘."
+                    )
+                    response = ai_client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=goodnight_prompt,
+                        config={"max_output_tokens": 200}
+                    )
+                    goodnight_text = str(response.text).strip()
+                except Exception as gemini_error:
+                    print(f"[Gemini Goodnight Error] {gemini_error} -> Groq 전환")
+
+            if goodnight_text is None:
+                goodnight_text = await generate_with_groq(
+                    goodnight_target.id, "선물봇", "곧 새벽이라 잠깐 자러 간다고 짧게 인사해줘"
+                )
+
+            if goodnight_text and not goodnight_text.startswith("❌") and not goodnight_text.startswith("😭"):
+                await goodnight_target.send(goodnight_text)
+                push_history(goodnight_target.id, "assistant", "선물봇", goodnight_text)
+
+        last_goodnight_date = now_kst.date()
+
+    # --- 기존 침묵 감지 + 새벽 선톡 제한 로직 ---
     if datetime.now() - last_message_time > timedelta(seconds=SILENCE_TIMEOUT):
+        # 새벽 0시~6시(KST)에는 선톡 쉬기
+        if QUIET_HOUR_START <= now_kst.hour < QUIET_HOUR_END:
+            return
+
         target = bot.get_channel(TARGET_CHANNEL_ID) if TARGET_CHANNEL_ID else last_channel
         if target:
             last_message_time = datetime.now()
