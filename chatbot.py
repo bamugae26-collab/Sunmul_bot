@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()  
 
 TARGET_CHANNEL_ID = None  
@@ -27,11 +26,81 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
 
-# 메인 제미나이 클라이언트
-if GEMINI_API_KEY:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    ai_client = None
+
+def _quota_error(e):
+    """한도 초과(429) 계열 에러인지 판단 - 이럴 때만 다음 키로 넘어감"""
+    msg = str(e)
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower()
+
+
+class GeminiKeyPool:
+    """
+    여러 Gemini API 키를 순환하며 사용하는 풀.
+    한도 초과(429)가 뜬 키는 건너뛰고 다음 키로 자동 전환.
+    모든 키가 소진/실패하면 예외를 그대로 던져서 상위 로직이 Groq로 넘어가게 함.
+    """
+
+    def __init__(self, keys):
+        self.keys = keys
+        self.clients = [genai.Client(api_key=k) for k in keys]
+        self.index = 0
+
+    @property
+    def available(self):
+        return len(self.clients) > 0
+
+    def current(self):
+        return self.clients[self.index] if self.available else None
+
+    def rotate(self):
+        self.index = (self.index + 1) % len(self.clients)
+
+    def call_with_rotation(self, fn):
+        """
+        fn(client) -> 결과 를 받아서, 429가 뜨면 다음 키로 넘어가며 최대 (키 개수)번 재시도.
+        전부 실패하면 마지막 예외를 그대로 던짐.
+        """
+        if not self.available:
+            raise RuntimeError("등록된 Gemini API 키가 없음")
+
+        last_error = None
+        for _ in range(len(self.clients)):
+            client = self.current()
+            try:
+                return fn(client)
+            except Exception as e:
+                last_error = e
+                if _quota_error(e):
+                    print(f"[Gemini Key {self.index + 1}/{len(self.clients)}] 한도 초과 -> 다음 키로 전환")
+                    self.rotate()
+                    continue
+                # 한도 초과가 아닌 다른 에러(모델명 오류 등)는 키를 바꿔도 똑같이 나므로 바로 중단
+                raise
+        raise last_error
+
+
+def load_gemini_keys():
+    """
+    처음부터 쓰던 숫자 없는 기본 키(GEMINI_API_KEY)를 항상 맨 앞에 두고,
+    거기에 GEMINI_API_KEY1 ~ GEMINI_API_KEY10 중 설정된 것들을 순서대로 추가.
+    (고정된 1~10 범위를 다 훑기 때문에, 번호를 2번부터 시작해도, 중간 번호가 비어도 문제없음)
+    """
+    keys = []
+
+    base_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if base_key:
+        keys.append(base_key)
+
+    for i in range(1, 11):  # 1~10번까지 고정 범위로 확인
+        key = os.getenv(f"GEMINI_API_KEY{i}", "").strip()
+        if key and key not in keys:
+            keys.append(key)
+
+    return keys
+
+
+_all_keys = load_gemini_keys()
+gemini_pool = GeminiKeyPool(_all_keys)
 
 # 백업 Groq 클라이언트
 if GROQ_API_KEY:
@@ -140,7 +209,7 @@ async def generate_with_groq(channel_id, current_user_name, prompt_content, has_
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 봇 로그인 성공! (맥락 기억 + 정체성 주입 + 답변 완결성 + 이미지/영상 인식 + 새벽 제한/굿나잇 인사 완료)')
+    print(f"{bot.user} 봇 로그인 성공! (Gemini 키 {len(gemini_pool.clients)}개 순환 + 맥락 기억 + 이미지/영상 인식 + 새벽 제한/굿나잇 인사 완료)")
     global last_message_time
     last_message_time = datetime.now()
     if not check_silence.is_running():
@@ -167,8 +236,8 @@ async def on_message(message):
         async with message.channel.typing():
             reply_text = None
 
-            # 1차 시도: 제미나이 API 호출 (이미지/영상 첨부 시 함께 전달)
-            if ai_client:
+            # 1차 시도: 제미나이 API 호출 (이미지/영상 첨부 시 함께 전달, 키 여러 개 순환)
+            if gemini_pool.available:
                 try:
                     full_prompt = (
                         f"{get_system_prompt()}\n\n"
@@ -177,14 +246,18 @@ async def on_message(message):
                         "위 흐름을 참고해서 이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
                     )
                     contents = await build_gemini_contents(full_prompt, message)
-                    response = ai_client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=contents,
-                        config={"max_output_tokens": 400}
-                    )
-                    reply_text = str(response.text).strip()
+
+                    def _call(client):
+                        response = client.models.generate_content(
+                            model='gemini-flash-latest',
+                            contents=contents,
+                            config={"max_output_tokens": 400}
+                        )
+                        return str(response.text).strip()
+
+                    reply_text = gemini_pool.call_with_rotation(_call)
                 except Exception as gemini_error:
-                    print(f"[Gemini Error] {gemini_error} -> Groq 엔진으로 전환합니다.")
+                    print(f"[Gemini Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 엔진으로 전환합니다.")
 
             # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 실행 (이미지는 못 봄)
             if reply_text is None:
@@ -206,7 +279,7 @@ async def check_silence():
         goodnight_target = bot.get_channel(TARGET_CHANNEL_ID) if TARGET_CHANNEL_ID else last_channel
         if goodnight_target:
             goodnight_text = None
-            if ai_client:
+            if gemini_pool.available:
                 try:
                     goodnight_prompt = (
                         f"{get_system_prompt()}\n\n"
@@ -214,14 +287,18 @@ async def check_silence():
                         "얘들아한테 '나 이제 자러 갈게~' 느낌으로 짧고 귀엽게 인사하고, "
                         "아침에 다시 올게 같은 뉘앙스로 한 문장만 말해줘."
                     )
-                    response = ai_client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=goodnight_prompt,
-                        config={"max_output_tokens": 200}
-                    )
-                    goodnight_text = str(response.text).strip()
+
+                    def _call(client):
+                        response = client.models.generate_content(
+                            model='gemini-flash-latest',
+                            contents=goodnight_prompt,
+                            config={"max_output_tokens": 200}
+                        )
+                        return str(response.text).strip()
+
+                    goodnight_text = gemini_pool.call_with_rotation(_call)
                 except Exception as gemini_error:
-                    print(f"[Gemini Goodnight Error] {gemini_error} -> Groq 전환")
+                    print(f"[Gemini Goodnight Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 전환")
 
             if goodnight_text is None:
                 goodnight_text = await generate_with_groq(
@@ -245,7 +322,7 @@ async def check_silence():
             last_message_time = datetime.now()
             reply_text = None
             
-            if ai_client:
+            if gemini_pool.available:
                 try:
                     full_prompt = (
                         f"{get_system_prompt()}\n\n"
@@ -253,14 +330,18 @@ async def check_silence():
                         "너는 심심해진 디스코드 대화방에 선물봇으로서 먼저 말을 거는 친근하고 쾌활한 친구야.\n"
                         "무조건 편한 반말로 '선물봇 심심해! 얘들아 뭐해?', '다들 자냐? 추천받을 사람!' 같은 대화 주제를 딱 한 문장으로만 보내줘."
                     )
-                    response = ai_client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=full_prompt,
-                        config={"max_output_tokens": 400}
-                    )
-                    reply_text = str(response.text).strip()
+
+                    def _call(client):
+                        response = client.models.generate_content(
+                            model='gemini-flash-latest',
+                            contents=full_prompt,
+                            config={"max_output_tokens": 400}
+                        )
+                        return str(response.text).strip()
+
+                    reply_text = gemini_pool.call_with_rotation(_call)
                 except Exception as gemini_error:
-                    print(f"[Gemini Silence Loop Error] {gemini_error} -> Groq 전환")
+                    print(f"[Gemini Silence Loop Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 전환")
 
             if reply_text is None:
                 reply_text = await generate_with_groq(target.id, "선물봇", "심심한 대화방에 선물봇으로서 선톡 날려줘")
