@@ -162,6 +162,20 @@ async def build_gemini_contents(prompt_text, message):
             print(f"[Attachment Read Error] {e}")
     return parts
 
+def make_gemini_config(max_output_tokens):
+    """
+    응답 생성용 공통 설정.
+    thinking_budget=0으로 '생각 과정'을 꺼서, 그 과정이 답변에 새어나오거나
+    토큰을 먼저 잡아먹어서 문장이 끊기는 문제를 막음.
+    (딕셔너리로 넣으면 API가 형식을 못 알아듣고 400 에러가 났던 적이 있어서,
+     SDK가 제공하는 정식 타입 객체로 넣음)
+    """
+    return types.GenerateContentConfig(
+        max_output_tokens=max_output_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
+
+
 # 공통 정체성 프롬프트 정의 (선물봇 자아 주입)
 def get_system_prompt():
     return (
@@ -251,7 +265,7 @@ async def on_message(message):
                         response = client.models.generate_content(
                             model='gemini-flash-latest',
                             contents=contents,
-                            config={"max_output_tokens": 400}
+                            config=make_gemini_config(400)
                         )
                         return str(response.text).strip()
 
@@ -292,7 +306,7 @@ async def check_silence():
                         response = client.models.generate_content(
                             model='gemini-flash-latest',
                             contents=goodnight_prompt,
-                            config={"max_output_tokens": 200}
+                            config=make_gemini_config(200)
                         )
                         return str(response.text).strip()
 
@@ -335,7 +349,7 @@ async def check_silence():
                         response = client.models.generate_content(
                             model='gemini-flash-latest',
                             contents=full_prompt,
-                            config={"max_output_tokens": 400}
+                            config=make_gemini_config(400)
                         )
                         return str(response.text).strip()
 
