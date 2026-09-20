@@ -2,25 +2,35 @@ import discord
 from discord.ext import tasks
 from google import genai
 from google.genai import types
-from openai import AsyncOpenAI  
-import asyncio
+import re
 import os
+import random
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+
+load_dotenv()  # 로컬(VSCode 등)에서 실행할 때 .env 파일의 값을 환경변수로 읽어옴. 배포 환경(Railway 등)에서는 무시되고 플랫폼에 등록한 값이 그대로 쓰임.
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()  
 
-TARGET_CHANNEL_ID = None  
-SILENCE_TIMEOUT = 1800
-MAX_HISTORY_TURNS = 12  # 채널별로 기억할 최근 메시지 개수
+TARGET_CHANNEL_ID = None
+SILENCE_TIMEOUT = 7200  # 2시간 동안 조용하면 선톡
+MAX_HISTORY_TURNS = 20  # 채널별로 기억할 최근 메시지 개수 (Gemini 키가 바뀌어도 이 기록은 그대로 유지됨)
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024  # 15MB - 너무 큰 파일은 스킵 (요청 용량 제한 대비)
+RANDOM_CHIME_IN_CHANCE = 0.25  # 멘션 안 해도 25% 확률로 자연스럽게 채팅에 낌
 
 KST = ZoneInfo("Asia/Seoul")
-QUIET_HOUR_START = 0   # 밤 12시
-QUIET_HOUR_END = 6     # 오전 6시
+SLEEP_HOUR_START = 23  # 밤 11시부터 잠들기 시작
+SLEEP_HOUR_END = 9     # 오전 9시에 기상 (그 전까지는 API 호출 자체를 안 해서 한도 절약)
 GOODNIGHT_HOUR = 23    # 이 시간대에 하루 한 번 자기 전 인사
+
+def is_sleep_time(now_kst):
+    """23시~다음날 9시(자정을 넘어가는 구간)인지 판단"""
+    h = now_kst.hour
+    if SLEEP_HOUR_START <= SLEEP_HOUR_END:
+        return SLEEP_HOUR_START <= h < SLEEP_HOUR_END
+    return h >= SLEEP_HOUR_START or h < SLEEP_HOUR_END
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -37,7 +47,7 @@ class GeminiKeyPool:
     """
     여러 Gemini API 키를 순환하며 사용하는 풀.
     한도 초과(429)가 뜬 키는 건너뛰고 다음 키로 자동 전환.
-    모든 키가 소진/실패하면 예외를 그대로 던져서 상위 로직이 Groq로 넘어가게 함.
+    등록된 모든 키가 소진/실패하면 예외를 그대로 던짐 (백업 엔진 없음).
     """
 
     def __init__(self, keys):
@@ -102,15 +112,6 @@ def load_gemini_keys():
 _all_keys = load_gemini_keys()
 gemini_pool = GeminiKeyPool(_all_keys)
 
-# 백업 Groq 클라이언트
-if GROQ_API_KEY:
-    groq_client = AsyncOpenAI(
-        api_key=GROQ_API_KEY,
-        base_url="https://api.groq.com/openai/v1"
-    )
-else:
-    groq_client = None
-
 last_message_time = datetime.now()
 last_channel = None
 last_goodnight_date = None  # 오늘 자기 전 인사를 이미 했는지 추적
@@ -130,20 +131,16 @@ def build_history_text(channel_id):
         lines.append(f"{speaker}: {h['content']}")
     return "\n".join(lines) if lines else "(아직 대화 기록 없음)"
 
-def build_groq_messages(channel_id, current_user_name, current_content, has_attachment=False):
-    """Groq(OpenAI 호환)용 - messages 배열 형태로 정리. Groq는 이미지/영상을 못 보므로 텍스트만 전달."""
-    messages = [{"role": "system", "content": get_system_prompt()}]
-    for h in channel_history[channel_id]:
-        if h["role"] == "assistant":
-            messages.append({"role": "assistant", "content": h["content"]})
-        else:
-            messages.append({"role": "user", "content": f"{h['name']}: {h['content']}"})
+# 모델이 대화 기록 포맷("선물봇: ...", "선물봇(너): ...")을 그대로 따라 하며
+# 답변 맨 앞에 자기 이름을 붙여버리는 경우가 있어서, 실제로 채팅에 보내기 전에
+# 그런 접두사를 한 번 더 걸러냄 (대본 티가 나지 않게).
+_NAME_PREFIX_RE = re.compile(r"^\s*선물봇(?:\(너\))?\s*[:：-]\s*")
 
-    user_line = f"{current_user_name}: {current_content}"
-    if has_attachment:
-        user_line += "\n(이 메시지에 이미지 또는 영상이 첨부되어 있지만, 지금 답변 엔진은 파일을 볼 수 없어. 파일을 못 본다는 걸 자연스럽게 언급하며 답해줘.)"
-    messages.append({"role": "user", "content": user_line})
-    return messages
+def strip_name_prefix(text):
+    if not text:
+        return text
+    cleaned = _NAME_PREFIX_RE.sub("", text.strip())
+    return cleaned.strip()
 
 async def build_gemini_contents(prompt_text, message):
     """첨부된 이미지/영상을 Gemini 멀티모달 입력으로 변환"""
@@ -182,44 +179,20 @@ def get_system_prompt():
         "너는 디스코드 서버에서 사람들과 어울리는 10~20대 친근한 친구이자 '선물봇'이야.\n"
         "디스코드 앱 프로필 이름이 무엇으로 표시되든 상관없이, 너 스스로를 부를 때는 무조건 '선물봇'이라고만 해.\n"
         "너의 이름은 무조건 '선물봇'이고, 유저들이 원하면 게임이나 영화, 선물 아이템 등을 추천해주는 역할을 해.\n"
-        "절대 존댓말을 쓰지 말고 100% 편한 한국어 반말만 사용해라. 이모지도 섞어줘.\n"
-        "의미 없는 영타(eoq 등)나 외계어는 절대 금지야.\n"
+        "기본 말투는 단정하고 예의 바른 존댓말이야.\n"
+        "다만 상대방이 반말을 써도 된다고 하거나, 편하게 말 놓자고 하거나, 반말로 대화를 걸어오면 그때부터는 자연스럽게 반말로 전환해서 대화해.\n"
+        "반말로 전환한 뒤에도 너무 풀어지지 않게, 여전히 단정한 커뮤(온라인 커뮤니티) 말투를 유지해.\n"
+        "ㅋㅋ, ㅇㅋ, ㄷㄷ 같은 가벼운 초성체는 자연스러운 흐름에서 아주 가끔씩만 살짝 섞어 써. 과하게 쓰지는 마.\n"
+        "이모지는 절대 쓰지 마.\n"
+        "의미 없는 영타(eoq 등)나 외계어, 과한 초성체/줄임말은 절대 금지야.\n"
         "친근하게 대하되 욕설이나 비속어는 절대 쓰지 말고, 선은 지키면서 친하게 장난쳐줘.\n"
         "아래에 최근 대화 기록이 주어지면 그 흐름을 참고해서, 이미 나온 이야기를 기억하는 것처럼 자연스럽게 이어서 대답해.\n"
+        "단, 그 대화 기록은 어디까지나 너의 기억일 뿐이야. 실제로 메시지를 보낼 때는 "
+        "'선물봇:', '선물봇(너):' 같은 이름표나 말머리를 절대 붙이지 말고, "
+        "친구가 채팅창에 바로 타이핑하듯 본문만 자연스럽게 보내.\n"
         "답변은 반드시 문장을 끝까지 완성해서 말해. 중간에 끊기지 않게 짧고 간결하게 요약해서라도 마무리해.\n"
         "이미지나 영상이 함께 주어지면 그 내용을 실제로 보고 파악해서 자연스럽게 반응해줘."
     )
-
-# 라이브러리 파싱 버그를 원천 차단한 Groq 호출 함수
-async def generate_with_groq(channel_id, current_user_name, prompt_content, has_attachment=False):
-    """OpenAI 비동기 표준 SDK 구조를 이용하되, 딕셔너리 안전 분해 방식으로 대답을 파싱합니다."""
-    if not groq_client:
-        return "😭 제미나이 한도가 초과되었는데 백업 API 키(GROQ_API_KEY)도 등록되어 있지 않아."
-        
-    try:
-        chat_completion = await groq_client.chat.completions.create(
-            messages=build_groq_messages(channel_id, current_user_name, prompt_content, has_attachment),
-            model="openai/gpt-oss-120b",
-            temperature=0.6,
-            max_tokens=300
-        )
-        
-        try:
-            return chat_completion.choices[0].message.content.strip()
-        except:
-            res_dict = chat_completion.model_dump()
-            return res_dict['choices'][0]['message']['content'].strip()
-            
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[Groq Client Fatal Error] {error_msg}")
-        
-        if "429" in error_msg:
-            return "😭 백업 엔진인 Groq 마저도 일시적인 한도 초과(429) 상태야. 잠시만 기다려줘!"
-        if "401" in error_msg:
-            return "❌ [Groq 오류] API 키 인증에 실패했어. Railway 환경변수의 GROQ_API_KEY 값을 다시 확인해줘!"
-            
-        return f"❌ 백업 서버 통신 장치 충돌 발생! (원인: {error_msg[:30]})"
 
 @bot.event
 async def on_ready():
@@ -247,17 +220,25 @@ async def on_message(message):
     push_history(message.channel.id, "user", message.author.display_name, history_note)
 
     if is_called:
+        now_kst = datetime.now(KST)
+        if is_sleep_time(now_kst):
+            # 새벽 시간대는 API 호출 없이 고정 문구로만 응답 (한도 절약)
+            reply_text = "지금은 자는 시간이라 답 못해줘... 아침 9시에 다시 깨어날게"
+            await message.channel.send(reply_text)
+            push_history(message.channel.id, "assistant", "선물봇", reply_text)
+            return
+
         async with message.channel.typing():
             reply_text = None
 
-            # 1차 시도: 제미나이 API 호출 (이미지/영상 첨부 시 함께 전달, 키 여러 개 순환)
             if gemini_pool.available:
                 try:
                     full_prompt = (
                         f"{get_system_prompt()}\n\n"
                         f"[최근 대화 기록]\n{build_history_text(message.channel.id)}\n\n"
                         f"방금 온 메시지 - {message.author.display_name}: '{message.content}'\n"
-                        "위 흐름을 참고해서 이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘."
+                        "위 흐름을 참고해서 이 대화에 맞장구치는 답변을 선물봇으로서 친구처럼 한두 문장으로 해줘. "
+                        "이름표 없이 본문만 보내."
                     )
                     contents = await build_gemini_contents(full_prompt, message)
 
@@ -269,20 +250,57 @@ async def on_message(message):
                         )
                         return str(response.text).strip()
 
-                    reply_text = gemini_pool.call_with_rotation(_call)
+                    reply_text = strip_name_prefix(gemini_pool.call_with_rotation(_call))
                 except Exception as gemini_error:
-                    print(f"[Gemini Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 엔진으로 전환합니다.")
+                    print(f"[Gemini Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error}")
 
-            # 2차 시도 (Fallback): 제미나이 오류 시 즉시 Groq 실행 (이미지는 못 봄)
-            if reply_text is None:
-                reply_text = await generate_with_groq(
-                    message.channel.id, message.author.display_name, message.content, has_attachment
+            if reply_text:
+                await message.channel.send(reply_text)
+                push_history(message.channel.id, "assistant", "선물봇", reply_text)
+        return
+
+    # --- 멘션 안 해도 25% 확률로 대화에 자연스럽게 낌 ---
+    now_kst = datetime.now(KST)
+    if is_sleep_time(now_kst):
+        return
+    if not message.content.strip():
+        return
+    if random.random() >= RANDOM_CHIME_IN_CHANCE:
+        return
+    if not gemini_pool.available:
+        return
+
+    async with message.channel.typing():
+        reply_text = None
+        try:
+            full_prompt = (
+                f"{get_system_prompt()}\n\n"
+                f"[최근 대화 기록]\n{build_history_text(message.channel.id)}\n\n"
+                f"방금 온 메시지 - {message.author.display_name}: '{message.content}'\n"
+                "너는 지금 멘션당하지 않았지만, 옆에서 대화를 듣다가 자연스럽게 한마디 거드는 중이야. "
+                "너무 나서지 말고, 정말 할 말이 있을 때 끼어드는 커뮤니티 멤버처럼 아주 짧게 한 문장만 말해줘. "
+                "이름표 없이 본문만 보내."
+            )
+            contents = await build_gemini_contents(full_prompt, message)
+
+            def _call(client):
+                response = client.models.generate_content(
+                    model='gemini-flash-latest',
+                    contents=contents,
+                    config=make_gemini_config(200)
                 )
+                return str(response.text).strip()
 
+            reply_text = strip_name_prefix(gemini_pool.call_with_rotation(_call))
+        except Exception as gemini_error:
+            print(f"[Gemini Random Chime-in Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error}")
+
+        if reply_text:
             await message.channel.send(reply_text)
             push_history(message.channel.id, "assistant", "선물봇", reply_text)
+            last_message_time = datetime.now()
 
-@tasks.loop(seconds=300) 
+@tasks.loop(seconds=300)
 async def check_silence():
     global last_message_time, last_channel, last_goodnight_date
 
@@ -299,7 +317,7 @@ async def check_silence():
                         f"{get_system_prompt()}\n\n"
                         "지금은 밤 11시대야. 너는 곧 새벽 시간이라 잠깐 쉬러 들어갈 예정이야.\n"
                         "얘들아한테 '나 이제 자러 갈게~' 느낌으로 짧고 귀엽게 인사하고, "
-                        "아침에 다시 올게 같은 뉘앙스로 한 문장만 말해줘."
+                        "아침에 다시 올게 같은 뉘앙스로 한 문장만 말해줘. 이름표 없이 본문만 보내."
                     )
 
                     def _call(client):
@@ -310,16 +328,11 @@ async def check_silence():
                         )
                         return str(response.text).strip()
 
-                    goodnight_text = gemini_pool.call_with_rotation(_call)
+                    goodnight_text = strip_name_prefix(gemini_pool.call_with_rotation(_call))
                 except Exception as gemini_error:
-                    print(f"[Gemini Goodnight Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 전환")
+                    print(f"[Gemini Goodnight Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error}")
 
-            if goodnight_text is None:
-                goodnight_text = await generate_with_groq(
-                    goodnight_target.id, "선물봇", "곧 새벽이라 잠깐 자러 간다고 짧게 인사해줘"
-                )
-
-            if goodnight_text and not goodnight_text.startswith("❌") and not goodnight_text.startswith("😭"):
+            if goodnight_text:
                 await goodnight_target.send(goodnight_text)
                 push_history(goodnight_target.id, "assistant", "선물봇", goodnight_text)
 
@@ -327,22 +340,23 @@ async def check_silence():
 
     # --- 기존 침묵 감지 + 새벽 선톡 제한 로직 ---
     if datetime.now() - last_message_time > timedelta(seconds=SILENCE_TIMEOUT):
-        # 새벽 0시~6시(KST)에는 선톡 쉬기
-        if QUIET_HOUR_START <= now_kst.hour < QUIET_HOUR_END:
+        # 취침 시간대(23시~9시, KST)에는 선톡 쉬기
+        if is_sleep_time(now_kst):
             return
 
         target = bot.get_channel(TARGET_CHANNEL_ID) if TARGET_CHANNEL_ID else last_channel
         if target:
             last_message_time = datetime.now()
             reply_text = None
-            
+
             if gemini_pool.available:
                 try:
                     full_prompt = (
                         f"{get_system_prompt()}\n\n"
                         f"[최근 대화 기록]\n{build_history_text(target.id)}\n\n"
                         "너는 심심해진 디스코드 대화방에 선물봇으로서 먼저 말을 거는 친근하고 쾌활한 친구야.\n"
-                        "무조건 편한 반말로 '선물봇 심심해! 얘들아 뭐해?', '다들 자냐? 추천받을 사람!' 같은 대화 주제를 딱 한 문장으로만 보내줘."
+                        "무조건 편한 반말로 '선물봇 심심해! 얘들아 뭐해?', '다들 자냐? 추천받을 사람!' 같은 대화 주제를 "
+                        "딱 한 문장으로만 보내줘. 이름표 없이 본문만 보내."
                     )
 
                     def _call(client):
@@ -353,14 +367,11 @@ async def check_silence():
                         )
                         return str(response.text).strip()
 
-                    reply_text = gemini_pool.call_with_rotation(_call)
+                    reply_text = strip_name_prefix(gemini_pool.call_with_rotation(_call))
                 except Exception as gemini_error:
-                    print(f"[Gemini Silence Loop Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error} -> Groq 전환")
+                    print(f"[Gemini Silence Loop Error] 키 {len(gemini_pool.clients)}개 모두 실패: {gemini_error}")
 
-            if reply_text is None:
-                reply_text = await generate_with_groq(target.id, "선물봇", "심심한 대화방에 선물봇으로서 선톡 날려줘")
-
-            if reply_text and not reply_text.startswith("❌") and not reply_text.startswith("😭"):
+            if reply_text:
                 await target.send(reply_text)
                 push_history(target.id, "assistant", "선물봇", reply_text)
 
