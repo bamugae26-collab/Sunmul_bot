@@ -2,4 +2,3 @@ discord.py
 google-genai
 pydantic
 openai
-groq
